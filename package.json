@@ -1,7 +1,7 @@
 {
   "name": "depth-particles",
   "private": true,
-  "version": "1.1.1",
+  "version": "1.1.3",
   "description": "深度粒子 — 置换底图 + 边缘粒子可视化小工具",
   "author": "Depth Particles",
   "type": "module",
@@ -12,10 +12,10 @@
     "preview": "vite preview",
     "electron": "electron .",
     "app": "vite build && electron .",
-    "dist": "vite build && electron-builder --win portable",
-    "dist:installer": "vite build && electron-builder --win nsis",
-    "dist:mac": "vite build && electron-builder --mac dmg zip",
-    "dist:all": "vite build && electron-builder --win portable --mac dmg zip",
+    "dist": "vite build && electron-builder --win portable --publish never",
+    "dist:installer": "vite build && electron-builder --win nsis --publish never",
+    "dist:mac": "vite build && electron-builder --mac dmg zip --publish never",
+    "dist:all": "vite build && electron-builder --win portable --mac dmg zip --publish never",
     "gen-depth": "node scripts/gen-depth.mjs",
     "gen-depth:video": "node scripts/gen-depth-video.mjs"
   },
