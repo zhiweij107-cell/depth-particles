@@ -75,7 +75,8 @@ jobs:
         run: |
           mkdir -p upload
           find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' \) -print -exec cp {} upload/ \;
-          cp USAGE.txt upload/USAGE.txt 2>/dev/null || cp 使用说明.txt upload/USAGE.txt
+          if [ -f USAGE.txt ]; then cp USAGE.txt upload/USAGE.txt; fi
+          if [ -f "????.txt" ]; then cp "????.txt" upload/USAGE.txt; fi
           ls -lah upload
 
       - name: Publish GitHub Release
@@ -92,8 +93,8 @@ jobs:
             - **macOS Intel**: `DepthParticles-*-mac-x64.dmg`
 
             ### macOS tip
-            Unsigned app �?right-click Open, or:
-            `xattr -cr /Applications/深度粒子.app`
+            Unsigned app ? right-click Open, or run:
+            `xattr -cr "/Applications/????.app"`
 
             See `USAGE.txt`. First AI depth run needs network (~100MB model).
         env:
