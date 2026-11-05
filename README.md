@@ -12,7 +12,7 @@
 | macOS Apple Silicon | `DepthParticles-*-mac-arm64.dmg`（需启用 CI 后自动产出） |
 | macOS Intel | `DepthParticles-*-mac-x64.dmg`（需启用 CI 后自动产出） |
 
-当前 **v1.1.0** 已上传 Windows 便携版。Mac 包需要在 macOS 上构建（本机是 Windows，无法本地交叉打包）；把仓库里的 `docs-release-workflow.yml` 放到 `.github/workflows/release.yml` 并授予 GitHub `workflow` 权限后，推送 `v*` tag 即可自动打 Win + Mac。
+推送 `v*` tag 后，GitHub Actions 会自动构建 Windows 便携版与 macOS（arm64 / x64）dmg/zip，并发布到 Releases。
 
 ## 开发
 
