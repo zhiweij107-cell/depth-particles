@@ -2,17 +2,17 @@
 
 置换底图 + 边缘粒子可视化：彩图 / 白模切换，深度差大处密而快向后飘。
 
-## 下载（推荐）
+## 下载
 
-到 [Releases](../../releases) 下载对应系统安装包：
+**Release 页面：** https://github.com/zhiweij107-cell/depth-particles/releases
 
 | 系统 | 文件 |
 |------|------|
-| Windows x64 | `深度粒子-*-win-x64-便携版.exe` |
-| macOS Apple Silicon | `深度粒子-*-mac-arm64.dmg` |
-| macOS Intel | `深度粒子-*-mac-x64.dmg` |
+| Windows x64 | `DepthParticles-*-win-x64-portable.exe` |
+| macOS Apple Silicon | `DepthParticles-*-mac-arm64.dmg`（需启用 CI 后自动产出） |
+| macOS Intel | `DepthParticles-*-mac-x64.dmg`（需启用 CI 后自动产出） |
 
-详见 `使用说明.txt`。
+当前 **v1.1.0** 已上传 Windows 便携版。Mac 包需要在 macOS 上构建（本机是 Windows，无法本地交叉打包）；把仓库里的 `docs-release-workflow.yml` 放到 `.github/workflows/release.yml` 并授予 GitHub `workflow` 权限后，推送 `v*` tag 即可自动打 Win + Mac。
 
 ## 开发
 
@@ -27,11 +27,9 @@ npm run dev
 # Windows 便携版
 npm run dist
 
-# macOS（需在 macOS 上执行）
+# macOS（必须在 Mac 上执行）
 npm run dist:mac
 ```
-
-推送形如 `v1.1.0` 的 tag 后，GitHub Actions 会自动构建 Win + Mac 并发布到 Releases。
 
 ## 交互
 
@@ -39,3 +37,5 @@ npm run dist:mac
 - **Click** — 全息扫描
 - **DblClick** — 散开 / 聚合
 - **Space** — 自动环视
+
+详见 `使用说明.txt` / Release 中的 `USAGE.txt`。

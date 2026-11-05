@@ -60,16 +60,16 @@
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-win-x64-便携版.${ext}"
+      "artifactName": "DepthParticles-${version}-win-x64-portable.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "${productName}-${version}-win-安装包.${ext}",
+      "artifactName": "DepthParticles-${version}-win-setup.${ext}",
       "shortcutName": "深度粒子"
     },
     "portable": {
-      "artifactName": "${productName}-${version}-win-x64-便携版.${ext}"
+      "artifactName": "DepthParticles-${version}-win-x64-portable.${ext}"
     },
     "mac": {
       "category": "public.app-category.graphics-design",
@@ -89,13 +89,13 @@
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
+      "artifactName": "DepthParticles-${version}-mac-${arch}.${ext}",
       "identity": null,
       "hardenedRuntime": false,
       "gatekeeperAssess": false
     },
     "dmg": {
-      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
+      "artifactName": "DepthParticles-${version}-mac-${arch}.${ext}"
     }
   }
 }
