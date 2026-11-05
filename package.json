@@ -1,0 +1,101 @@
+{
+  "name": "depth-particles",
+  "private": true,
+  "version": "1.1.0",
+  "description": "深度粒子 — 置换底图 + 边缘粒子可视化小工具",
+  "author": "Depth Particles",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron": "electron .",
+    "app": "vite build && electron .",
+    "dist": "vite build && electron-builder --win portable",
+    "dist:installer": "vite build && electron-builder --win nsis",
+    "dist:mac": "vite build && electron-builder --mac dmg zip",
+    "dist:all": "vite build && electron-builder --win portable --mac dmg zip",
+    "gen-depth": "node scripts/gen-depth.mjs",
+    "gen-depth:video": "node scripts/gen-depth-video.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.4.0",
+    "three": "^0.172.0"
+  },
+  "devDependencies": {
+    "electron": "^35.1.2",
+    "electron-builder": "^26.0.12",
+    "sharp": "^0.33.5",
+    "vite": "^6.0.0"
+  },
+  "build": {
+    "appId": "com.depthparticles.app",
+    "productName": "深度粒子",
+    "copyright": "Copyright © Depth Particles",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "dist"
+      },
+      {
+        "from": "使用说明.txt",
+        "to": "使用说明.txt"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-win-x64-便携版.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-${version}-win-安装包.${ext}",
+      "shortcutName": "深度粒子"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-win-x64-便携版.${ext}"
+    },
+    "mac": {
+      "category": "public.app-category.graphics-design",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+node_modules
+dist
+release
+.DS_Store
+*.local
+*.exe
+*.dmg
+*.AppImage
+.vscode
+.idea
