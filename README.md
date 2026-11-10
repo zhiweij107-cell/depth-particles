@@ -9,10 +9,18 @@
 | 系统 | 文件 |
 |------|------|
 | Windows x64 | `DepthParticles-*-win-x64-portable.exe` |
-| macOS Apple Silicon | `DepthParticles-*-mac-arm64.dmg`（需启用 CI 后自动产出） |
-| macOS Intel | `DepthParticles-*-mac-x64.dmg`（需启用 CI 后自动产出） |
+| macOS Apple Silicon | `DepthParticles-*-mac-arm64.dmg` |
+| macOS Intel | `DepthParticles-*-mac-x64.dmg`（需 CI 打出 x64） |
 
-推送 `v*` tag 后，GitHub Actions 会自动构建 Windows 便携版与 macOS（arm64 / x64）dmg/zip，并发布到 Releases。
+### macOS 提示「已损坏」？
+
+不是安装包坏了。未签名 + 浏览器下载会触发隔离标记，系统误报损坏。终端执行：
+
+```bash
+xattr -cr /Applications/深度粒子.app
+```
+
+推送 `v*` tag 后，GitHub Actions 会自动构建并发布到 Releases。
 
 ## 开发
 
