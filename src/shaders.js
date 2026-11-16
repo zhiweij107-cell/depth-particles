@@ -107,7 +107,7 @@ void main() {
 
   vec3 home = position;
 
-  // Drift backward — speed/amplitude driven by aMotion (depth gradient).
+  // Drift along local -Z; amplitude driven by aMotion (depth gradient).
   float cycle = fract(uTime * aSpeed * uFlowSpeed + aSeed);
   float move = smoothstep(0.02, 0.15, aMotion);
   float life = mix(0.0, cycle, max(move, 0.001));

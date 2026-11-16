@@ -712,7 +712,7 @@ async function main() {
 
   function animate() {
     requestAnimationFrame(animate)
-    const t = clock.elapsedTime
+    const t = clock.getElapsedTime()
     orbit.update()
     for (const m of models) m.tick(t)
     // Keep inspector live while dragging gizmo / after orbit
