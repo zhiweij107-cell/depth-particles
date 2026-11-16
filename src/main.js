@@ -1,43 +1,60 @@
 import * as THREE from 'three'
-import { baseDisplaceVertexChunk, cloudVertex, cloudFragment } from './shaders.js'
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { TransformControls } from 'three/addons/controls/TransformControls.js'
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js'
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import {
   estimateDepthFromImage,
   fileToImage,
   canvasToPreviewUrl,
 } from './depthEstimate.js'
-
-const MAX_SIDE = 680
+import {
+  createSpaceModel,
+  placementOffset,
+  newModelId,
+  DEFAULT_MODEL_PARAMS,
+} from './modelFactory.js'
+import {
+  serializeSpace,
+  deserializeSpace,
+  saveSpaceToDisk,
+  openSpaceFromDisk,
+  captureScreenshot,
+} from './sceneDisk.js'
 
 const loaderEl = document.getElementById('loader')
 const loaderText = document.getElementById('loader-text')
 const countLabel = document.getElementById('count-label')
+const statusLine = document.getElementById('status-line')
+const workTitleEl = document.getElementById('work-title')
+const modelListEl = document.getElementById('model-list')
+const modelEmptyEl = document.getElementById('model-empty')
+const inspectorEl = document.getElementById('inspector')
+const inspectorEmptyEl = document.getElementById('inspector-empty')
 
-const state = {
-  mouse: new THREE.Vector2(0, 0),
-  targetMouse: new THREE.Vector2(0, 0),
-  explode: 0,
-  autoOrbit: false,
-  holdUntil: 0,
-  pointScale: 1.75,
-  camDist: 4.4,
-  fov: 32,
-  yawDeg: 55,
-  pitchDeg: 28,
-  maxSide: MAX_SIDE,
-  depthScale: 0.22,
-  // Min normalized depth-gradient to spawn particles (below = none)
-  minGrad: 0.22,
-  // User depth map: dark = near, light = far
-  invertDepth: true,
-  // 'color' | 'clay' — clay = neutral gray Phong relief
-  viewMode: 'color',
-  flowSpeed: 1.0,
-  swirl: 1.0,
+/** @type {ReturnType<typeof createSpaceModel>[]} */
+let models = []
+/** @type {ReturnType<typeof createSpaceModel> | null} */
+let selected = null
+let workName = '未命名作品'
+let suppressInspector = false
+let rebuildTimer = 0
+
+const spaceState = {
+  xformMode: 'translate',
 }
 
 function setStatus(loading, text) {
   if (text) loaderText.textContent = text
   loaderEl.classList.toggle('hide', !loading)
+}
+
+function setLine(text, busy = false) {
+  if (!statusLine) return
+  statusLine.textContent = text || ''
+  statusLine.classList.toggle('busy', busy)
 }
 
 function loadImage(url) {
@@ -50,7 +67,7 @@ function loadImage(url) {
   })
 }
 
-function bindSlider(id, outId, format, onChange, { fireInitial = true } = {}) {
+function bindSlider(id, outId, format, onChange, { fireInitial = false } = {}) {
   const input = document.getElementById(id)
   if (!input) return null
   const out = document.getElementById(outId)
@@ -60,826 +77,652 @@ function bindSlider(id, outId, format, onChange, { fireInitial = true } = {}) {
     if (fire) onChange(v)
   }
   input.addEventListener('input', () => sync(true))
-  sync(fireInitial)
+  if (fireInitial) sync(true)
+  else if (out) out.textContent = format(Number(input.value))
   return input
 }
 
-function readDepthField(img, w, h, invert) {
-  const canvas = document.createElement('canvas')
-  canvas.width = w
-  canvas.height = h
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })
-  ctx.drawImage(img, 0, 0, w, h)
-  const raw = ctx.getImageData(0, 0, w, h).data
-  const field = new Float32Array(w * h)
-  for (let i = 0; i < w * h; i++) {
-    const v = raw[i * 4] / 255
-    field[i] = invert ? 1 - v : v
-  }
-  const blurred = new Float32Array(w * h)
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      let sum = 0
-      for (let oy = -1; oy <= 1; oy++) {
-        for (let ox = -1; ox <= 1; ox++) sum += field[(y + oy) * w + (x + ox)]
-      }
-      blurred[y * w + x] = sum / 9
-    }
-  }
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) field[y * w + x] = blurred[y * w + x]
-  }
-  return field
-}
-
-function makeCardTextures(colorImg, depthImg, invert) {
-  const colorTex = new THREE.Texture(colorImg)
-  colorTex.colorSpace = THREE.SRGBColorSpace
-  colorTex.needsUpdate = true
-  colorTex.minFilter = THREE.LinearFilter
-  colorTex.magFilter = THREE.LinearFilter
-
-  let depthTex
-  if (depthImg) {
-    depthTex = new THREE.Texture(depthImg)
-    depthTex.colorSpace = THREE.NoColorSpace
-    depthTex.needsUpdate = true
-    depthTex.minFilter = THREE.LinearFilter
-    depthTex.magFilter = THREE.LinearFilter
-  } else {
-    const c = document.createElement('canvas')
-    c.width = c.height = 4
-    const ctx = c.getContext('2d')
-    ctx.fillStyle = '#737373'
-    ctx.fillRect(0, 0, 4, 4)
-    depthTex = new THREE.CanvasTexture(c)
-    depthTex.colorSpace = THREE.NoColorSpace
-  }
-
-  return { colorTex, depthTex, invert: !!invert }
-}
-
-function attachDisplaceCompile(mat, extras = {}) {
-  mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, mat.userData)
-    shader.vertexShader = shader.vertexShader
-      .replace(
-        '#include <common>',
-        `#include <common>\n${baseDisplaceVertexChunk}`,
-      )
-      .replace(
-        '#include <beginnormal_vertex>',
-        `#include <beginnormal_vertex>
-        objectNormal = displacedNormal(uv);
-        #ifdef USE_TANGENT
-          objectTangent = normalize(cross(objectNormal, vec3(0.0, 1.0, 0.0)));
-        #endif`,
-      )
-      .replace(
-        '#include <begin_vertex>',
-        `#include <begin_vertex>
-        transformed = displacedPosition(transformed, uv);`,
-      )
-    if (extras.afterCompile) extras.afterCompile(shader)
-  }
-}
-
-/** Continuous displaced photo plate under the particle spray. */
-function buildDisplaceBase(colorImg, depthImg, opts = {}) {
-  const cardH = opts.cardH ?? 1.62
-  const srcW = colorImg.naturalWidth || colorImg.width
-  const srcH = colorImg.naturalHeight || colorImg.height
-  const aspect = srcW / srcH
-  const cardW = cardH * aspect
-  const depthScale = opts.depthScale ?? state.depthScale
-  const invert = opts.invertDepth ?? state.invertDepth
-  const clay = (opts.viewMode ?? state.viewMode) === 'clay'
-  const { colorTex, depthTex } = makeCardTextures(colorImg, depthImg, invert)
-
-  const segs = Math.min(280, Math.max(120, Math.round(Math.max(srcW, srcH) / 3.5)))
-  const geo = new THREE.PlaneGeometry(cardW, cardH, segs, segs)
-
-  const sharedUD = {
-    uDepth: { value: depthTex },
-    uDisplace: { value: depthScale },
-    uInvertDepth: { value: invert ? 1 : 0 },
-    uCardSize: { value: new THREE.Vector2(cardW, cardH) },
-    uDepthTexel: { value: new THREE.Vector2(1 / Math.max(segs, 1), 1 / Math.max(segs, 1)) },
-  }
-
-  let mat
-  if (clay) {
-    // Neutral gray Phong — read form only
-    mat = new THREE.MeshPhongMaterial({
-      color: 0xb6b6b2,
-      specular: 0x3a3a38,
-      shininess: 28,
-      flatShading: false,
-      side: THREE.FrontSide,
-      depthWrite: true,
-      depthTest: true,
-      toneMapped: false,
-    })
-    Object.assign(mat.userData, sharedUD)
-    attachDisplaceCompile(mat)
-    mat.customProgramCacheKey = () => 'displace-clay-phong-v2'
-    colorTex.dispose()
-  } else {
-    mat = new THREE.MeshBasicMaterial({
-      map: colorTex,
-      toneMapped: false,
-      side: THREE.FrontSide,
-      depthWrite: true,
-      depthTest: true,
-    })
-    Object.assign(mat.userData, sharedUD)
-    attachDisplaceCompile(mat)
-    mat.customProgramCacheKey = () => 'displace-color-basic-v2'
-  }
-
-  const mesh = new THREE.Mesh(geo, mat)
-  mesh.position.z = -0.002
-  mesh.userData.cardW = cardW
-  mesh.userData.cardH = cardH
-  mesh.userData.textures = clay ? [depthTex] : [colorTex, depthTex]
-  mesh.userData.clay = clay
-  return mesh
-}
-
-/**
- * Density & flow ∝ depth-gradient:
- *   steep depth → dense, fast backward drift
- *   below minGrad → no particles
- */
-function buildParticleCloud(colorImg, depthImg, opts = {}) {
-  const { maxSide = MAX_SIDE, cardH = 1.62, alphaCut = 8 } = opts
-  const minGrad = opts.minGrad ?? state.minGrad
-
-  const side = Math.min(MAX_SIDE, Math.max(180, Math.round(maxSide)))
-  const srcW = colorImg.naturalWidth || colorImg.width
-  const srcH = colorImg.naturalHeight || colorImg.height
-  const scale = Math.min(1, side / Math.max(srcW, srcH))
-  const w = Math.max(2, Math.round(srcW * scale))
-  const h = Math.max(2, Math.round(srcH * scale))
-
-  const colorCanvas = document.createElement('canvas')
-  colorCanvas.width = w
-  colorCanvas.height = h
-  const cctx = colorCanvas.getContext('2d', { willReadFrequently: true })
-  cctx.drawImage(colorImg, 0, 0, w, h)
-  const colorData = cctx.getImageData(0, 0, w, h).data
-
-  const invert = opts.invertDepth ?? state.invertDepth
-  const depthField = depthImg
-    ? readDepthField(depthImg, w, h, invert)
-    : new Float32Array(w * h).fill(0.45)
-
-  const sampleD = (x, y) => {
-    x = Math.max(0, Math.min(w - 1, x | 0))
-    y = Math.max(0, Math.min(h - 1, y | 0))
-    return depthField[y * w + x]
-  }
-
-  const gradField = new Float32Array(w * h)
-  let gradMax = 1e-5
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const g = Math.hypot(
-        sampleD(x + 1, y) - sampleD(x - 1, y),
-        sampleD(x, y + 1) - sampleD(x, y - 1),
-      )
-      gradField[y * w + x] = g
-      if (g > gradMax) gradMax = g
-    }
-  }
-
-  const aspect = srcW / srcH
-  const cardW = cardH * aspect
-  const positions = []
-  const colors = []
-  const sizes = []
-  const seeds = []
-  const depths = []
-  const motions = []
-  const speeds = []
-  const scatters = []
-
-  const cellX = cardW / w
-  const cellY = cardH / h
-  const pointPx = Math.max(1.5, Math.min(2.6, 700 / h))
-  const depthScale = opts.depthScale ?? state.depthScale
-
-  const pushParticle = ({ x, y, d, motion, speed, jitter = 0.08, sizeMul = 1 }) => {
-    const i = (y * w + x) * 4
-    const r = colorData[i]
-    const g = colorData[i + 1]
-    const b = colorData[i + 2]
-    const u = (x + 0.5) / w
-    const v = (y + 0.5) / h
-    // Sit slightly in front of the displaced plate
-    const px = (u - 0.5) * cardW + (Math.random() - 0.5) * cellX * jitter
-    const py = (0.5 - v) * cardH + (Math.random() - 0.5) * cellY * jitter
-    const pz = (d - 0.4) * depthScale + 0.012
-
-    positions.push(px, py, pz)
-    colors.push(r / 255, g / 255, b / 255)
-    sizes.push(pointPx * sizeMul * (0.92 + d * 0.12))
-    const seed = Math.random()
-    seeds.push(seed)
-    depths.push(d)
-    motions.push(motion)
-    speeds.push(speed)
-
-    const ang = seed * Math.PI * 2
-    const elev = (Math.random() - 0.35) * Math.PI * 0.5
-    const dist = 0.45 + Math.random() * 1.05 + d * 0.35
-    scatters.push(
-      Math.cos(ang) * Math.cos(elev) * dist,
-      Math.sin(elev) * dist * 0.75,
-      Math.sin(ang) * Math.cos(elev) * dist * 0.5 + 0.15,
-    )
-  }
-
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = (y * w + x) * 4
-      if (colorData[i + 3] < alphaCut) continue
-
-      const u = (x + 0.5) / w
-      const v = (y + 0.5) / h
-      const nx = (u - 0.5) * 2
-      const ny = (v - 0.5) * 2
-      if (Math.abs(nx) ** 4 + Math.abs(ny) ** 4 > 1.0) continue
-
-      const d = sampleD(x, y)
-      const gNorm = Math.min(1, gradField[y * w + x] / (gradMax * 0.55))
-      if (gNorm < minGrad) continue
-
-      // Remap so minGrad → 0, 1 → 1 for density / speed
-      const motion = Math.min(1, (gNorm - minGrad) / Math.max(1e-4, 1 - minGrad))
-      const density = Math.pow(motion, 0.75)
-      const keepProb = THREE.MathUtils.lerp(0.35, 1.0, density)
-      if (Math.random() > keepProb) continue
-
-      const speed = 0.5 + motion * 2.35
-      pushParticle({
-        x,
-        y,
-        d,
-        motion: Math.max(0.12, motion),
-        speed,
-        jitter: 0.14 + motion * 0.3,
-        sizeMul: 0.9 + motion * 0.22,
-      })
-      if (motion > 0.25 && Math.random() < 0.3 + motion * 0.55) {
-        pushParticle({
-          x,
-          y,
-          d,
-          motion: Math.min(1, motion * 1.08),
-          speed: speed * (0.9 + Math.random() * 0.45),
-          jitter: 0.4,
-          sizeMul: 0.72 + motion * 0.15,
-        })
-      }
-      if (motion > 0.55 && Math.random() < 0.4) {
-        pushParticle({
-          x,
-          y,
-          d,
-          motion: Math.min(1, motion * 1.12),
-          speed: speed * (1.05 + Math.random() * 0.5),
-          jitter: 0.55,
-          sizeMul: 0.65,
-        })
-      }
-    }
-  }
-
-  const geo = new THREE.BufferGeometry()
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  geo.setAttribute('aColor', new THREE.Float32BufferAttribute(colors, 3))
-  geo.setAttribute('aSize', new THREE.Float32BufferAttribute(sizes, 1))
-  geo.setAttribute('aSeed', new THREE.Float32BufferAttribute(seeds, 1))
-  geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depths, 1))
-  geo.setAttribute('aMotion', new THREE.Float32BufferAttribute(motions, 1))
-  geo.setAttribute('aSpeed', new THREE.Float32BufferAttribute(speeds, 1))
-  geo.setAttribute('aScatter', new THREE.Float32BufferAttribute(scatters, 3))
-
-  const mat = new THREE.ShaderMaterial({
-    // depthWrite must be on so nearer points occlude farther ones when orbiting.
-    // Pair with hard alpha discard in the fragment shader (soft edges would fight the Z-buffer).
-    transparent: true,
-    depthWrite: true,
-    depthTest: true,
-    alphaTest: 0.55,
-    toneMapped: false,
-    blending: THREE.NormalBlending,
-    uniforms: {
-      uTime: { value: 0 },
-      uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) },
-      uExplode: { value: 0 },
-      uMouse: { value: new THREE.Vector2(0, 0) },
-      uPointScale: { value: state.pointScale },
-      uFlowSpeed: { value: state.flowSpeed },
-      uSwirl: { value: state.swirl },
-      uClay: { value: state.viewMode === 'clay' ? 1 : 0 },
-      uScanOrigin: { value: new THREE.Vector2(0, 0) },
-      uScanStart: { value: -1 },
-      uScanSpeed: { value: 1.15 },
-      uScanActive: { value: 0 },
-    },
-    vertexShader: cloudVertex,
-    fragmentShader: cloudFragment,
-  })
-
-  const points = new THREE.Points(geo, mat)
-  points.frustumCulled = false
-  points.userData.count = positions.length / 3
-  points.userData.cardW = cardW
-  points.userData.cardH = cardH
-  return points
+function setControl(id, value, outId, format) {
+  const input = document.getElementById(id)
+  if (!input) return
+  input.value = String(value)
+  const out = outId ? document.getElementById(outId) : null
+  if (out && format) out.textContent = format(Number(value))
 }
 
 async function main() {
-  setStatus(true, '加载卡面与深度图…')
-  const assets = {
-    color: await loadImage('/card.jpg'),
-    depth: await loadImage('/depth.png').catch(() => null),
-  }
-
-  const previewColor = document.getElementById('preview-color')
-  const previewDepth = document.getElementById('preview-depth')
-  const importStatus = document.getElementById('import-status')
-
-  function setImportStatus(text, busy = false) {
-    if (!importStatus) return
-    importStatus.textContent = text || ''
-    importStatus.classList.toggle('busy', busy)
-  }
-
-  function refreshPreviews() {
-    if (previewColor && assets.color) {
-      previewColor.src = canvasToPreviewUrl(assets.color)
-    }
-    if (previewDepth && assets.depth) {
-      previewDepth.src = canvasToPreviewUrl(assets.depth)
-    }
-  }
-
-  refreshPreviews()
+  setStatus(true, '初始化空间…')
 
   const scene = new THREE.Scene()
   scene.background = new THREE.Color('#f5f5f3')
 
-  const camera = new THREE.PerspectiveCamera(
-    state.fov,
-    window.innerWidth / window.innerHeight,
-    0.1,
-    40,
-  )
-  camera.position.set(0, 0.04, state.camDist)
+  const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 80)
+  camera.position.set(2.8, 1.6, 5.2)
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(window.innerWidth, window.innerHeight)
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.setClearColor('#f5f5f3', 1)
   document.getElementById('app').appendChild(renderer.domElement)
 
-  // Lights for clay Phong mode (ignored by MeshBasic color mode)
-  const amb = new THREE.AmbientLight(0xffffff, 0.42)
+  const amb = new THREE.AmbientLight(0xffffff, 0.45)
   const key = new THREE.DirectionalLight(0xffffff, 0.95)
   key.position.set(2.4, 3.2, 4.2)
-  const fill = new THREE.DirectionalLight(0xe8e8f0, 0.38)
+  const fill = new THREE.DirectionalLight(0xe8e8f0, 0.35)
   fill.position.set(-2.8, 1.0, 2.2)
-  const rim = new THREE.DirectionalLight(0xffffff, 0.22)
-  rim.position.set(0.2, -1.5, -3.0)
-  scene.add(amb, key, fill, rim)
+  scene.add(amb, key, fill)
 
   const root = new THREE.Group()
   scene.add(root)
 
-  // Invisible hit surface for click → card local XY (scan origin)
-  const hitPlane = new THREE.Mesh(
-    new THREE.PlaneGeometry(1.2, 1.62),
-    new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }),
+  const ground = new THREE.Mesh(
+    new THREE.CircleGeometry(6, 64),
+    new THREE.MeshBasicMaterial({ color: 0xcfcfc9, transparent: true, opacity: 0.22, depthWrite: false }),
   )
-  root.add(hitPlane)
+  ground.rotation.x = -Math.PI / 2
+  ground.position.y = -1.35
+  scene.add(ground)
+
+  const orbit = new OrbitControls(camera, renderer.domElement)
+  orbit.enableDamping = true
+  orbit.dampingFactor = 0.08
+  orbit.target.set(0, 0.2, 0)
+  orbit.minDistance = 1.5
+  orbit.maxDistance = 18
+
+  const transform = new TransformControls(camera, renderer.domElement)
+  const transformHelper = transform.getHelper()
+  transform.setMode('translate')
+  transform.setSize(0.85)
+  transform.addEventListener('dragging-changed', (e) => {
+    orbit.enabled = !e.value
+  })
+  const syncXformUi = () => {
+    if (selected && !suppressInspector) syncTransformInspector()
+  }
+  transform.addEventListener('change', syncXformUi)
+  transform.addEventListener('objectChange', syncXformUi)
+  scene.add(transformHelper)
+
+  const composer = new EffectComposer(renderer)
+  composer.addPass(new RenderPass(scene, camera))
+  const outlinePass = new OutlinePass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    scene,
+    camera,
+  )
+  outlinePass.edgeStrength = 4.5
+  outlinePass.edgeGlow = 0.35
+  outlinePass.edgeThickness = 1.4
+  outlinePass.pulsePeriod = 0
+  outlinePass.visibleEdgeColor.set('#2f6bff')
+  outlinePass.hiddenEdgeColor.set('#163a8c')
+  composer.addPass(outlinePass)
+  composer.addPass(new OutputPass())
+
   const raycaster = new THREE.Raycaster()
   const ndc = new THREE.Vector2()
+  const clock = new THREE.Clock()
 
-  const shadow = new THREE.Mesh(
-    new THREE.CircleGeometry(0.88, 64),
-    new THREE.MeshBasicMaterial({
-      color: 0xc5c5c1,
-      transparent: true,
-      opacity: 0.18,
-      depthWrite: false,
-    }),
-  )
-  shadow.rotation.x = -Math.PI / 2
-  shadow.position.set(0, -1.02, 0)
-  scene.add(shadow)
+  // Distinguish click-select vs orbit drag
+  const pointerTrack = {
+    downX: 0,
+    downY: 0,
+    moved: false,
+    downOnCanvas: false,
+  }
+  const CLICK_MOVE_PX = 6
 
-  let cloud = null
-  let baseMesh = null
-  let rebuildTimer = 0
-  let rebuilding = false
-
-  function disposeMesh(mesh) {
-    if (!mesh) return
-    root.remove(mesh)
-    mesh.geometry?.dispose()
-    if (mesh.userData.textures) {
-      for (const t of mesh.userData.textures) t?.dispose?.()
-      mesh.userData.textures = null
-    }
-    mesh.material?.dispose?.()
+  function updateWorkTitle() {
+    if (workTitleEl) workTitleEl.textContent = `${workName} · ${models.length} 个模型`
+    if (countLabel) countLabel.textContent = `${models.length} models`
   }
 
-  function applyLiveUniforms() {
-    if (cloud) {
-      const u = cloud.material.uniforms
-      u.uPointScale.value = state.pointScale
-      u.uPixelRatio.value = Math.min(window.devicePixelRatio, 2)
-      u.uFlowSpeed.value = state.flowSpeed
-      u.uSwirl.value = state.swirl
-      u.uClay.value = state.viewMode === 'clay' ? 1 : 0
+  function refreshModelList() {
+    if (!modelListEl) return
+    modelListEl.innerHTML = ''
+    modelEmptyEl.hidden = models.length > 0
+    for (const m of models) {
+      const row = document.createElement('div')
+      row.className = 'model-item' + (selected?.id === m.id ? ' active' : '')
+      row.dataset.id = m.id
+      row.innerHTML = `
+        <div>
+          <strong>${escapeHtml(m.name)}</strong>
+          <span>${m.params.particlesEnabled ? `${m.particleCount} pts` : '粒子关'} · ${m.params.viewMode === 'clay' ? '白模' : '彩图'}</span>
+        </div>
+        <button type="button" data-act="del">删</button>
+      `
+      modelListEl.appendChild(row)
     }
-    if (baseMesh?.material?.userData) {
-      const u = baseMesh.material.userData
-      if (u.uDisplace) u.uDisplace.value = state.depthScale
-      if (u.uInvertDepth) u.uInvertDepth.value = state.invertDepth ? 1 : 0
-    }
+    updateWorkTitle()
   }
 
-  function syncViewModeUI() {
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  function setXformMode(mode) {
+    spaceState.xformMode = mode
+    transform.setMode(mode)
+    document.querySelectorAll('[data-xform]').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.xform === mode)
+    })
+    document.querySelectorAll('.xform-pane').forEach((pane) => {
+      pane.hidden = pane.dataset.pane !== mode
+    })
+    syncTransformInspector()
+  }
+
+  function syncTransformInspector() {
+    if (!selected) return
+    suppressInspector = true
+    const g = selected.group
+    setControl('t-px', g.position.x, 't-px-out', (v) => v.toFixed(2))
+    setControl('t-py', g.position.y, 't-py-out', (v) => v.toFixed(2))
+    setControl('t-pz', g.position.z, 't-pz-out', (v) => v.toFixed(2))
+    setControl('t-rx', THREE.MathUtils.radToDeg(g.rotation.x), 't-rx-out', (v) => `${v | 0}°`)
+    setControl('t-ry', THREE.MathUtils.radToDeg(g.rotation.y), 't-ry-out', (v) => `${v | 0}°`)
+    setControl('t-rz', THREE.MathUtils.radToDeg(g.rotation.z), 't-rz-out', (v) => `${v | 0}°`)
+    setControl('t-sx', g.scale.x, 't-sx-out', (v) => v.toFixed(2))
+    setControl('t-sy', g.scale.y, 't-sy-out', (v) => v.toFixed(2))
+    setControl('t-sz', g.scale.z, 't-sz-out', (v) => v.toFixed(2))
+    const sc = (g.scale.x + g.scale.y + g.scale.z) / 3
+    setControl('t-sc', sc, 't-sc-out', (v) => v.toFixed(2))
+    suppressInspector = false
+  }
+
+  function updateOutline() {
+    const objs = []
+    if (selected?.base) objs.push(selected.base)
+    outlinePass.selectedObjects = objs
+  }
+
+  function syncReliefInspector() {
+    if (!selected) return
+    suppressInspector = true
+    const p = selected.params
+    setControl('p-depth', p.depthScale, 'p-depth-out', (v) => v.toFixed(2))
+    setControl('p-size', p.pointScale, 'p-size-out', (v) => v.toFixed(2))
+    setControl('p-mingrad', p.minGrad, 'p-mingrad-out', (v) => v.toFixed(2))
+    setControl('p-flow', p.flowSpeed, 'p-flow-out', (v) => v.toFixed(2))
+    setControl('p-swirl', p.swirl, 'p-swirl-out', (v) => v.toFixed(2))
+    const inv = document.getElementById('p-invert')
+    if (inv) inv.checked = !!p.invertDepth
+    const parts = document.getElementById('p-particles')
+    if (parts) parts.checked = !!p.particlesEnabled
     document.querySelectorAll('input[name="view-mode"]').forEach((el) => {
-      el.checked = el.value === state.viewMode
+      el.checked = el.value === p.viewMode
     })
-    document.body.dataset.viewMode = state.viewMode
+    document.getElementById('particle-ctrls')?.classList.toggle('off', !p.particlesEnabled)
+    suppressInspector = false
   }
 
-  function applyCamera() {
-    camera.fov = state.fov
-    camera.updateProjectionMatrix()
+  function showInspector(on) {
+    if (inspectorEl) inspectorEl.hidden = !on
+    if (inspectorEmptyEl) inspectorEmptyEl.hidden = on
   }
 
-  function updateCount() {
-    if (!cloud) return
-    countLabel.textContent = `${cloud.userData.count.toLocaleString()} pts`
+  function selectModel(model) {
+    selected = model || null
+    if (selected) {
+      transform.attach(selected.group)
+      transformHelper.visible = true
+      showInspector(true)
+      setXformMode(spaceState.xformMode || 'translate')
+      syncReliefInspector()
+    } else {
+      transform.detach()
+      transformHelper.visible = false
+      showInspector(false)
+    }
+    updateOutline()
+    refreshModelList()
   }
 
-  function rebuildCloud(showLoader = true) {
-    if (rebuilding) return
-    rebuilding = true
-    if (showLoader) setStatus(true, '重建粒子云…')
-
-    requestAnimationFrame(() => {
-      disposeMesh(cloud)
-      cloud = null
-      disposeMesh(baseMesh)
-      baseMesh = null
-
-      const opts = {
-        maxSide: Math.min(MAX_SIDE, state.maxSide),
-        cardH: 1.62,
-        depthScale: state.depthScale,
-        invertDepth: state.invertDepth,
-        minGrad: state.minGrad,
-        viewMode: state.viewMode,
-      }
-
-      baseMesh = buildDisplaceBase(assets.color, assets.depth, opts)
-      cloud = buildParticleCloud(assets.color, assets.depth, opts)
-      root.add(baseMesh)
-      root.add(cloud)
-
-      hitPlane.geometry.dispose()
-      hitPlane.geometry = new THREE.PlaneGeometry(
-        cloud.userData.cardW * 1.02,
-        cloud.userData.cardH * 1.02,
-      )
-      shadow.position.y = -cloud.userData.cardH * 0.5 - 0.08
-      shadow.scale.setScalar(Math.max(cloud.userData.cardW, cloud.userData.cardH) * 0.7)
-      applyLiveUniforms()
-      updateCount()
-      setStatus(false)
-      rebuilding = false
-    })
+  function pickModelAt(clientX, clientY) {
+    ndc.set((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1)
+    raycaster.setFromCamera(ndc, camera)
+    const hitMeshes = []
+    for (const m of models) {
+      m.group.traverse((obj) => {
+        if (obj.isMesh) hitMeshes.push(obj)
+      })
+    }
+    const hits = raycaster.intersectObjects(hitMeshes, false)
+    if (!hits.length) return null
+    let obj = hits[0].object
+    while (obj && !obj.userData?.isSpaceModel) obj = obj.parent
+    if (!obj?.userData?.modelId) return null
+    return models.find((x) => x.id === obj.userData.modelId) || null
   }
 
-  function scheduleRebuild() {
+  function handleCanvasSelect(clientX, clientY) {
+    if (transform.dragging) return
+    const m = pickModelAt(clientX, clientY)
+    if (!m) {
+      selectModel(null)
+      return
+    }
+    // Click same model again → deselect
+    if (selected?.id === m.id) {
+      selectModel(null)
+      return
+    }
+    selectModel(m)
+  }
+
+  function addModelToSpace(model, { select = true } = {}) {
+    models.push(model)
+    root.add(model.group)
+    model.applyLiveUniforms()
+    if (select) selectModel(model)
+    else refreshModelList()
+    setLine(`已加入「${model.name}」`)
+  }
+
+  function removeModel(id) {
+    const idx = models.findIndex((m) => m.id === id)
+    if (idx < 0) return
+    const m = models[idx]
+    if (selected?.id === id) selectModel(null)
+    root.remove(m.group)
+    m.dispose()
+    models.splice(idx, 1)
+    refreshModelList()
+    setLine(`已删除「${m.name}」`)
+  }
+
+  function clearSpace() {
+    selectModel(null)
+    for (const m of models) {
+      root.remove(m.group)
+      m.dispose()
+    }
+    models = []
+    refreshModelList()
+  }
+
+  function scheduleReliefRebuild() {
     window.clearTimeout(rebuildTimer)
-    rebuildTimer = window.setTimeout(() => rebuildCloud(true), 280)
+    rebuildTimer = window.setTimeout(() => {
+      if (!selected) return
+      setLine('重建浮雕…', true)
+      selected.rebuildRelief()
+      selected.applyLiveUniforms()
+      updateOutline()
+      refreshModelList()
+      setLine(`已更新「${selected.name}」`)
+    }, 220)
   }
 
-  async function importColorFile(file) {
+  async function addImageFile(file) {
     try {
       setStatus(true, '读取图片…')
-      setImportStatus('读取图片…', true)
+      setLine('读取图片…', true)
       const img = await fileToImage(file)
-      assets.color = img
-      refreshPreviews()
-
-      setStatus(true, '估算深度（首次较慢）…')
-      setImportStatus('估算深度中…', true)
-      const depthCanvas = await estimateDepthFromImage(img, (msg) => {
+      setStatus(true, '估算深度…')
+      setLine('估算深度中…', true)
+      const depth = await estimateDepthFromImage(img, (msg) => {
         setStatus(true, msg)
-        setImportStatus(msg, true)
+        setLine(msg, true)
       })
-      assets.depth = depthCanvas
-      // Auto depth = white near
-      state.invertDepth = false
-      const inv = document.getElementById('p-invert')
-      if (inv) inv.checked = false
-      refreshPreviews()
-
-      setStatus(true, '重建粒子云…')
-      setImportStatus('重建粒子…', true)
-      rebuildCloud(true)
-      // rebuildCloud clears status asynchronously; mark import done shortly after
-      setTimeout(() => setImportStatus('完成 · AI 深度（白近）'), 400)
+      const idx = models.length
+      const pos = placementOffset(idx)
+      const model = createSpaceModel({
+        id: newModelId(),
+        name: file.name?.replace(/\.[^.]+$/, '') || `模型 ${idx + 1}`,
+        colorImg: img,
+        depthImg: depth,
+        params: {
+          ...DEFAULT_MODEL_PARAMS,
+          invertDepth: false,
+          particlesEnabled: false,
+        },
+        transform: { position: [pos.x, pos.y, pos.z], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      })
+      addModelToSpace(model)
+      setStatus(false)
+      setLine(`完成 · 「${model.name}」已放入空间（粒子默认关闭）`)
     } catch (err) {
       console.error(err)
       setStatus(false)
-      setImportStatus(`失败：${err.message || err}`)
+      setLine(`失败：${err.message || err}`)
     }
   }
 
-  async function importDepthFile(file) {
+  async function saveWork() {
+    if (!models.length) {
+      setLine('空间为空，先添加模型')
+      return
+    }
+    // 不在保存前用 prompt，以免打断用户手势导致系统保存框失败 / 写出空文件
     try {
-      setImportStatus('读取深度图…', true)
-      const img = await fileToImage(file)
-      assets.depth = img
-      // Custom depth often dark=near like the previous map — leave toggle to user
-      refreshPreviews()
-      rebuildCloud(true)
-      setImportStatus('已替换深度图')
+      setLine('正在写入磁盘…', true)
+      const doc = serializeSpace({
+        name: workName,
+        models,
+        camera: {
+          position: camera.position.toArray(),
+          target: orbit.target.toArray(),
+        },
+      })
+      const res = await saveSpaceToDisk(doc, workName)
+      if (res.method === 'cancelled') {
+        setLine('已取消保存')
+        return
+      }
+      if (res.name) {
+        const bare = String(res.name)
+          .replace(/\.depthspace\.json$/i, '')
+          .replace(/\.json$/i, '')
+        if (bare) {
+          workName = bare
+          updateWorkTitle()
+        }
+      }
+      setLine(`作品已保存 · ${res.name}`)
     } catch (err) {
       console.error(err)
-      setImportStatus(`失败：${err.message || err}`)
+      setLine(`保存失败：${err.message || err}`)
     }
   }
 
-  bindSlider('p-size', 'p-size-out', (v) => v.toFixed(2), (v) => {
-    state.pointScale = v
-    applyLiveUniforms()
-  })
-  bindSlider('p-flow', 'p-flow-out', (v) => v.toFixed(2), (v) => {
-    state.flowSpeed = v
-    applyLiveUniforms()
-  })
-  bindSlider('p-swirl', 'p-swirl-out', (v) => v.toFixed(2), (v) => {
-    state.swirl = v
-    applyLiveUniforms()
-  })
-  bindSlider('c-dist', 'c-dist-out', (v) => v.toFixed(2), (v) => {
-    state.camDist = v
-  })
-  bindSlider('c-fov', 'c-fov-out', (v) => `${v.toFixed(1)}°`, (v) => {
-    state.fov = v
-    applyCamera()
-  })
-  bindSlider('c-yaw', 'c-yaw-out', (v) => `${v | 0}°`, (v) => {
-    state.yawDeg = v
-  })
-  bindSlider('c-pitch', 'c-pitch-out', (v) => `${v | 0}°`, (v) => {
-    state.pitchDeg = v
-  })
-  bindSlider(
-    'p-side',
-    'p-side-out',
-    (v) => String(Math.min(MAX_SIDE, v | 0)),
-    (v) => {
-      state.maxSide = Math.min(MAX_SIDE, v)
-      scheduleRebuild()
-    },
-    { fireInitial: false },
-  )
-  bindSlider(
-    'p-depth',
-    'p-depth-out',
-    (v) => v.toFixed(2),
-    (v) => {
-      state.depthScale = v
-      applyLiveUniforms()
-      scheduleRebuild()
-    },
-    { fireInitial: false },
-  )
-  bindSlider(
-    'p-mingrad',
-    'p-mingrad-out',
-    (v) => v.toFixed(2),
-    (v) => {
-      state.minGrad = v
-      scheduleRebuild()
-    },
-    { fireInitial: false },
-  )
-
-  const invertEl = document.getElementById('p-invert')
-  if (invertEl) {
-    invertEl.checked = state.invertDepth
-    invertEl.addEventListener('change', () => {
-      state.invertDepth = invertEl.checked
-      scheduleRebuild()
-    })
+  async function openWork() {
+    try {
+      setLine('选择作品文件…（可选 .json）', true)
+      const picked = await openSpaceFromDisk()
+      if (!picked) {
+        setLine('已取消打开')
+        return
+      }
+      setStatus(true, `读取 ${picked.name}…`)
+      setLine(`读取 ${picked.name}…`, true)
+      const data = await deserializeSpace(picked.doc, {
+        onProgress: (msg) => {
+          setStatus(true, msg)
+          setLine(msg, true)
+        },
+      })
+      clearSpace()
+      workName = data.name || picked.name.replace(/\.depthspace\.json$/i, '').replace(/\.json$/i, '') || workName
+      for (let i = 0; i < data.models.length; i++) {
+        const item = data.models[i]
+        setStatus(true, `放入场景 ${i + 1}/${data.models.length}…`)
+        setLine(`放入场景 ${i + 1}/${data.models.length}…`, true)
+        const model = createSpaceModel({
+          id: item.id || newModelId(),
+          name: item.name,
+          colorImg: item.colorImg,
+          depthImg: item.depthImg,
+          params: item.params,
+          transform: item.transform,
+        })
+        addModelToSpace(model, { select: false })
+        // 让出主线程，避免 16 个模型同步建网格时界面假死
+        await new Promise((r) => requestAnimationFrame(r))
+      }
+      if (data.camera?.position) camera.position.fromArray(data.camera.position)
+      if (data.camera?.target) orbit.target.fromArray(data.camera.target)
+      orbit.update()
+      selectModel(models[0] || null)
+      setStatus(false)
+      setLine(`已打开「${workName}」· ${models.length} 个模型`)
+      updateWorkTitle()
+    } catch (err) {
+      console.error(err)
+      setStatus(false)
+      setLine(`打开失败：${err.message || err}`)
+    }
   }
 
-  document.querySelectorAll('input[name="view-mode"]').forEach((el) => {
-    el.addEventListener('change', () => {
-      if (!el.checked) return
-      state.viewMode = el.value === 'clay' ? 'clay' : 'color'
-      syncViewModeUI()
-      scheduleRebuild()
-    })
-  })
-  syncViewModeUI()
+  async function takeShot() {
+    try {
+      const prevHelper = transformHelper.visible
+      const prevOutline = outlinePass.selectedObjects
+      transformHelper.visible = false
+      outlinePass.selectedObjects = []
+      composer.render()
+      const stamp = new Date()
+      const p = (n) => String(n).padStart(2, '0')
+      const filename = `${workName.replace(/[\\/:*?"<>|]/g, '_')}_${stamp.getFullYear()}${p(stamp.getMonth() + 1)}${p(stamp.getDate())}_${p(stamp.getHours())}${p(stamp.getMinutes())}.png`
+      const res = await captureScreenshot(renderer, filename)
+      transformHelper.visible = prevHelper
+      outlinePass.selectedObjects = prevOutline
+      if (res.method === 'cancelled') setLine('已取消截图')
+      else setLine(`截图已保存 · ${res.name}`)
+    } catch (err) {
+      console.error(err)
+      setLine(`截图失败：${err.message || err}`)
+    }
+  }
 
+  // Bootstrap: load default card as first model
+  try {
+    const color = await loadImage('/card.jpg')
+    const depth = await loadImage('/depth.png').catch(() => null)
+    if (depth) {
+      const model = createSpaceModel({
+        name: '示例卡面',
+        colorImg: color,
+        depthImg: depth,
+        params: { ...DEFAULT_MODEL_PARAMS, invertDepth: true, particlesEnabled: false },
+        transform: { position: [0, 0.15, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      })
+      addModelToSpace(model)
+    }
+  } catch (err) {
+    console.warn(err)
+  }
+  setStatus(false)
+  setLine('就绪 · 添加图片放入空间，选中后可变换')
+  showInspector(!!selected)
+  refreshModelList()
+
+  // UI bindings
   const fileImage = document.getElementById('file-image')
-  const fileDepth = document.getElementById('file-depth')
-  const btnPickImage = document.getElementById('btn-pick-image')
-  const btnPickDepth = document.getElementById('btn-pick-depth')
-  const importZone = document.getElementById('import-zone')
-
-  btnPickImage?.addEventListener('click', (e) => {
-    e.stopPropagation()
-    fileImage?.click()
-  })
-  btnPickDepth?.addEventListener('click', (e) => {
-    e.stopPropagation()
-    fileDepth?.click()
-  })
+  document.getElementById('btn-add-image')?.addEventListener('click', () => fileImage?.click())
   fileImage?.addEventListener('change', () => {
     const f = fileImage.files?.[0]
-    if (f) importColorFile(f)
+    if (f) addImageFile(f)
     fileImage.value = ''
   })
-  fileDepth?.addEventListener('change', () => {
-    const f = fileDepth.files?.[0]
-    if (f) importDepthFile(f)
-    fileDepth.value = ''
+  document.getElementById('btn-save-space')?.addEventListener('click', () => saveWork())
+  document.getElementById('btn-open-space')?.addEventListener('click', () => openWork())
+  document.getElementById('btn-shot')?.addEventListener('click', () => takeShot())
+
+  document.querySelectorAll('[data-xform]').forEach((btn) => {
+    btn.addEventListener('click', () => setXformMode(btn.dataset.xform))
   })
 
-  importZone?.addEventListener('click', (e) => {
-    if (e.target.closest('button')) return
-    fileImage?.click()
-  })
-  ;['dragenter', 'dragover'].forEach((type) => {
-    importZone?.addEventListener(type, (e) => {
-      e.preventDefault()
+  modelListEl?.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-act="del"]')
+    const row = e.target.closest('.model-item')
+    if (!row) return
+    const id = row.dataset.id
+    if (btn) {
       e.stopPropagation()
-      importZone.classList.add('dragover')
-    })
+      if (window.confirm('从空间删除该模型？')) removeModel(id)
+      return
+    }
+    const m = models.find((x) => x.id === id)
+    if (!m) return
+    if (selected?.id === m.id) selectModel(null)
+    else selectModel(m)
   })
-  ;['dragleave', 'drop'].forEach((type) => {
-    importZone?.addEventListener(type, (e) => {
-      e.preventDefault()
-      e.stopPropagation()
-      importZone.classList.remove('dragover')
-    })
+
+  bindSlider('t-px', 't-px-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.position.x = v
   })
-  importZone?.addEventListener('drop', (e) => {
-    const f = e.dataTransfer?.files?.[0]
-    if (f) importColorFile(f)
+  bindSlider('t-py', 't-py-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.position.y = v
+  })
+  bindSlider('t-pz', 't-pz-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.position.z = v
+  })
+  bindSlider('t-rx', 't-rx-out', (v) => `${v | 0}°`, (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.rotation.x = THREE.MathUtils.degToRad(v)
+  })
+  bindSlider('t-ry', 't-ry-out', (v) => `${v | 0}°`, (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.rotation.y = THREE.MathUtils.degToRad(v)
+  })
+  bindSlider('t-rz', 't-rz-out', (v) => `${v | 0}°`, (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.rotation.z = THREE.MathUtils.degToRad(v)
+  })
+  bindSlider('t-sx', 't-sx-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.scale.x = v
+  })
+  bindSlider('t-sy', 't-sy-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.scale.y = v
+  })
+  bindSlider('t-sz', 't-sz-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.scale.z = v
+  })
+  bindSlider('t-sc', 't-sc-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.group.scale.setScalar(v)
+    syncTransformInspector()
+  })
+
+  bindSlider('p-depth', 'p-depth-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.params.depthScale = v
+    selected.applyLiveUniforms()
+    scheduleReliefRebuild()
+  })
+  bindSlider('p-size', 'p-size-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.params.pointScale = v
+    selected.applyLiveUniforms()
+  })
+  bindSlider('p-mingrad', 'p-mingrad-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.params.minGrad = v
+    if (selected.params.particlesEnabled) scheduleReliefRebuild()
+  })
+  bindSlider('p-flow', 'p-flow-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.params.flowSpeed = v
+    selected.applyLiveUniforms()
+  })
+  bindSlider('p-swirl', 'p-swirl-out', (v) => v.toFixed(2), (v) => {
+    if (!selected || suppressInspector) return
+    selected.params.swirl = v
+    selected.applyLiveUniforms()
+  })
+
+  document.getElementById('p-invert')?.addEventListener('change', (e) => {
+    if (!selected || suppressInspector) return
+    selected.params.invertDepth = e.target.checked
+    scheduleReliefRebuild()
+  })
+  document.getElementById('p-particles')?.addEventListener('change', (e) => {
+    if (!selected || suppressInspector) return
+    setLine(e.target.checked ? '生成粒子…' : '关闭粒子…', true)
+    selected.setParticlesEnabled(e.target.checked)
+    selected.applyLiveUniforms()
+    refreshModelList()
+    syncReliefInspector()
+    setLine(e.target.checked ? `粒子已开 · ${selected.particleCount} pts` : '粒子已关')
+  })
+  document.querySelectorAll('input[name="view-mode"]').forEach((el) => {
+    el.addEventListener('change', () => {
+      if (!el.checked || !selected || suppressInspector) return
+      selected.params.viewMode = el.value === 'clay' ? 'clay' : 'color'
+      scheduleReliefRebuild()
+    })
   })
 
   const panel = document.getElementById('panel')
   panel?.addEventListener('pointerdown', (e) => e.stopPropagation())
-  panel?.addEventListener('click', (e) => e.stopPropagation())
+  document.getElementById('toolbar')?.addEventListener('pointerdown', (e) => e.stopPropagation())
 
-  setStatus(true, '装配粒子云…')
-  rebuildCloud(false)
-  const boot = setInterval(() => {
-    if (cloud) {
-      clearInterval(boot)
-      setStatus(false)
-      updateCount()
-    }
-  }, 50)
-
-  const clock = new THREE.Clock()
-  let explodePhase = 'idle'
-
-  function triggerExplode() {
-    if (explodePhase !== 'idle') return
-    explodePhase = 'out'
-  }
-
-  function triggerScan(clientX, clientY) {
-    if (!cloud) return
-    ndc.set(
-      (clientX / window.innerWidth) * 2 - 1,
-      -((clientY / window.innerHeight) * 2 - 1),
-    )
-    raycaster.setFromCamera(ndc, camera)
-    const hits = raycaster.intersectObject(hitPlane, false)
-    if (!hits.length) return
-
-    const local = root.worldToLocal(hits[0].point.clone())
-    const u = cloud.material.uniforms
-    u.uScanOrigin.value.set(local.x, local.y)
-    u.uScanStart.value = clock.elapsedTime
-    u.uScanActive.value = 1
-    u.uScanSpeed.value = 1.05 + Math.random() * 0.25
-  }
-
-  window.addEventListener('pointermove', (e) => {
-    if (e.target.closest?.('#panel')) return
-    state.targetMouse.set(
-      (e.clientX / window.innerWidth) * 2 - 1,
-      -((e.clientY / window.innerHeight) * 2 - 1),
-    )
+  renderer.domElement.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return
+    pointerTrack.downX = e.clientX
+    pointerTrack.downY = e.clientY
+    pointerTrack.moved = false
+    pointerTrack.downOnCanvas = true
   })
-
-  renderer.domElement.addEventListener('click', (e) => {
-    triggerScan(e.clientX, e.clientY)
+  renderer.domElement.addEventListener('pointermove', (e) => {
+    if (!pointerTrack.downOnCanvas) return
+    const dx = e.clientX - pointerTrack.downX
+    const dy = e.clientY - pointerTrack.downY
+    if (dx * dx + dy * dy > CLICK_MOVE_PX * CLICK_MOVE_PX) pointerTrack.moved = true
   })
-
-  // Optional: Shift+Click still does the old scatter burst
-  renderer.domElement.addEventListener('dblclick', (e) => {
-    e.preventDefault()
-    if (explodePhase === 'idle') triggerExplode()
+  renderer.domElement.addEventListener('pointerup', (e) => {
+    if (e.button !== 0 || !pointerTrack.downOnCanvas) return
+    const wasClick = !pointerTrack.moved && !transform.dragging
+    pointerTrack.downOnCanvas = false
+    // Orbit / transform drag → keep selection; only short click changes it
+    if (!wasClick) return
+    handleCanvasSelect(e.clientX, e.clientY)
+  })
+  renderer.domElement.addEventListener('pointercancel', () => {
+    pointerTrack.downOnCanvas = false
   })
 
   window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') {
+    if (e.target.closest('input,textarea')) return
+    if (e.key === 'g' || e.key === 'G') setXformMode('translate')
+    if (e.key === 'r' || e.key === 'R') setXformMode('rotate')
+    if (e.key === 's' || e.key === 'S') setXformMode('scale')
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selected) {
       e.preventDefault()
-      state.autoOrbit = !state.autoOrbit
+      removeModel(selected.id)
     }
+    if (e.key === 'Escape') selectModel(null)
   })
 
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight
     camera.updateProjectionMatrix()
     renderer.setSize(window.innerWidth, window.innerHeight)
-    applyLiveUniforms()
+    composer.setSize(window.innerWidth, window.innerHeight)
+    outlinePass.resolution.set(window.innerWidth, window.innerHeight)
+    for (const m of models) m.applyLiveUniforms()
+  })
+
+  // Drag-drop images onto canvas
+  ;['dragenter', 'dragover'].forEach((type) => {
+    window.addEventListener(type, (e) => {
+      e.preventDefault()
+    })
+  })
+  window.addEventListener('drop', (e) => {
+    e.preventDefault()
+    if (e.target.closest?.('#panel,#toolbar')) return
+    const f = e.dataTransfer?.files?.[0]
+    if (f && f.type.startsWith('image/')) addImageFile(f)
   })
 
   function animate() {
     requestAnimationFrame(animate)
-    if (!cloud) {
-      renderer.render(scene, camera)
-      return
-    }
-
-    const dt = Math.min(clock.getDelta(), 0.05)
     const t = clock.elapsedTime
-
-    if (state.autoOrbit) {
-      state.targetMouse.set(Math.sin(t * 0.55), Math.cos(t * 0.4) * 0.55)
-    }
-    state.mouse.lerp(state.targetMouse, 1 - Math.exp(-dt * 14))
-
-    if (explodePhase === 'out') {
-      state.explode = THREE.MathUtils.damp(state.explode, 1, 8.5, dt)
-      if (state.explode > 0.97) {
-        explodePhase = 'hold'
-        state.holdUntil = t + 0.35
-      }
-    } else if (explodePhase === 'hold') {
-      if (t > state.holdUntil) explodePhase = 'in'
-    } else if (explodePhase === 'in') {
-      state.explode = THREE.MathUtils.damp(state.explode, 0, 7.0, dt)
-      if (state.explode < 0.012) {
-        state.explode = 0
-        explodePhase = 'idle'
-      }
-    }
-
-    const yaw = THREE.MathUtils.degToRad(state.yawDeg)
-    const pitch = THREE.MathUtils.degToRad(state.pitchDeg)
-    root.rotation.y = state.mouse.x * yaw
-    root.rotation.x = state.mouse.y * pitch
-
-    cloud.material.uniforms.uTime.value = t
-    cloud.material.uniforms.uExplode.value = state.explode
-    cloud.material.uniforms.uMouse.value.copy(state.mouse)
-    cloud.material.uniforms.uFlowSpeed.value = state.flowSpeed
-    cloud.material.uniforms.uSwirl.value = state.swirl
-    cloud.material.uniforms.uClay.value = state.viewMode === 'clay' ? 1 : 0
-
-    shadow.material.opacity = 0.1 + (1 - state.explode) * 0.08
-    shadow.scale.setScalar(1 + state.explode * 0.25)
-
-    const orbitX = state.mouse.x * Math.sin(yaw) * state.camDist * 0.55
-    const orbitY = state.mouse.y * Math.sin(pitch) * state.camDist * 0.35
-    camera.position.x = orbitX
-    camera.position.y = 0.04 + orbitY
-    camera.position.z =
-      state.camDist * Math.max(0.35, Math.cos(state.mouse.x * yaw * 0.85)) - state.explode * 0.15
-    camera.lookAt(0, 0, 0)
-
-    renderer.render(scene, camera)
+    orbit.update()
+    for (const m of models) m.tick(t)
+    // Keep inspector live while dragging gizmo / after orbit
+    if (selected && transform.dragging) syncTransformInspector()
+    composer.render()
   }
-
   animate()
 }
 
 main().catch((err) => {
   console.error(err)
-  setStatus(true, `加载失败：${err.message}`)
+  setStatus(true, `启动失败：${err.message}`)
 })

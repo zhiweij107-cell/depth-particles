@@ -28,6 +28,53 @@ vec3 displacedNormal(vec2 uv) {
 }
 `
 
+/**
+ * Helpers for alpha cutout + dither (injected into fragment common).
+ * The actual discard runs inline after map_fragment — diffuseColor is local to main().
+ */
+export const baseAlphaDitherHelpers = /* glsl */ `
+uniform float uClayShade;
+
+float bayer4(vec2 fragCoord) {
+  float x = floor(mod(fragCoord.x, 4.0));
+  float y = floor(mod(fragCoord.y, 4.0));
+  float idx = x + y * 4.0;
+  // Unrolled Bayer 4×4 / 16
+  float v =
+    idx < 0.5 ? 0.0 :
+    idx < 1.5 ? 8.0 :
+    idx < 2.5 ? 2.0 :
+    idx < 3.5 ? 10.0 :
+    idx < 4.5 ? 12.0 :
+    idx < 5.5 ? 4.0 :
+    idx < 6.5 ? 14.0 :
+    idx < 7.5 ? 6.0 :
+    idx < 8.5 ? 3.0 :
+    idx < 9.5 ? 11.0 :
+    idx < 10.5 ? 1.0 :
+    idx < 11.5 ? 9.0 :
+    idx < 12.5 ? 15.0 :
+    idx < 13.5 ? 7.0 :
+    idx < 14.5 ? 13.0 : 5.0;
+  return (v + 0.5) / 16.0;
+}
+`
+
+/** Inline snippet — must sit inside main() after #include <map_fragment> */
+export const baseAlphaDitherInline = /* glsl */ `
+{
+  float a = diffuseColor.a;
+  if (a < 0.004) discard;
+  if (uClayShade > 0.5) {
+    diffuseColor.rgb = vec3(0.714);
+  }
+  if (a < 0.999) {
+    if (a < bayer4(gl_FragCoord.xy)) discard;
+  }
+  diffuseColor.a = 1.0;
+}
+`
+
 export const cloudVertex = /* glsl */ `
 attribute float aSize;
 attribute float aSeed;

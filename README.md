@@ -1,26 +1,15 @@
-# 深度粒子 · Depth Particles
+# 深度粒子 · Depth Space v2
 
-置换底图 + 边缘粒子可视化：彩图 / 白模切换，深度差大处密而快向后飘。
+互动空间：把多张图片变成可移动 / 旋转 / 缩放的浮雕模型，整场作品可落盘，一键截图。
 
-## 下载
+## 功能
 
-**Release 页面：** https://github.com/zhiweij107-cell/depth-particles/releases
-
-| 系统 | 文件 |
-|------|------|
-| Windows x64 | `DepthParticles-*-win-x64-portable.exe` |
-| macOS Apple Silicon | `DepthParticles-*-mac-arm64.dmg` |
-| macOS Intel | `DepthParticles-*-mac-x64.dmg`（需 CI 打出 x64） |
-
-### macOS 提示「已损坏」？
-
-不是安装包坏了。未签名 + 浏览器下载会触发隔离标记，系统误报损坏。终端执行：
-
-```bash
-xattr -cr /Applications/深度粒子.app
-```
-
-推送 `v*` tag 后，GitHub Actions 会自动构建并发布到 Releases。
+- **添加图片**：自动估深并放入空间（可连续添加）
+- **选中模型**：侧栏显示变换参数与浮雕参数
+- **G / R / S**：移动 / 旋转 / 缩放手柄
+- **粒子开关**：默认关闭，按需开启以省性能
+- **保存作品**：`.depthspace.json` 写到本地磁盘（原图 + 深度 + 参数 + 变换）
+- **截图**：隐藏变换手柄后导出 PNG
 
 ## 开发
 
@@ -29,21 +18,13 @@ npm install
 npm run dev
 ```
 
-## 本地打包
+打开 http://localhost:5173/
+
+## 打包
 
 ```bash
-# Windows 便携版
-npm run dist
-
-# macOS（必须在 Mac 上执行）
-npm run dist:mac
+npm run dist       # Windows 便携版
+npm run dist:mac   # macOS（需在 Mac 上）
 ```
 
-## 交互
-
-- **Move** — 旋转观察
-- **Click** — 全息扫描
-- **DblClick** — 散开 / 聚合
-- **Space** — 自动环视
-
-详见 `使用说明.txt` / Release 中的 `USAGE.txt`。
+推送 `v*` tag 后 GitHub Actions 会发布 Release。
