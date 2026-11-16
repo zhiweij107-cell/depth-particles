@@ -97,48 +97,22 @@ function downloadBlob(blob, filename) {
   const a = document.createElement('a')
   a.href = url
   a.download = filename
+  a.rel = 'noopener'
+  document.body.appendChild(a)
   a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 1500)
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 2000)
 }
 
-/** Save JSON work to disk (File System Access API or download fallback). */
+/**
+ * Save JSON work via a single browser download.
+ * Avoid showSaveFilePicker: it creates an empty file first, and write failures
+ * previously triggered a second download — leaving an empty + a good file.
+ */
 export async function saveSpaceToDisk(doc, suggestedName) {
   const text = JSON.stringify(doc)
   const blob = new Blob([text], { type: 'application/json' })
   const filename = `${(suggestedName || doc.name || 'space').replace(/[\\/:*?"<>|]/g, '_')}.depthspace.json`
-
-  if (window.showSaveFilePicker) {
-    try {
-      const handle = await window.showSaveFilePicker({
-        suggestedName: filename,
-        excludeAcceptAllOption: false,
-        types: [
-          {
-            description: 'Depth Space 作品',
-            accept: {
-              'application/json': ['.json', '.depthspace.json'],
-            },
-          },
-        ],
-      })
-      try {
-        const writable = await handle.createWritable()
-        await writable.write(blob)
-        await writable.close()
-        return { method: 'picker', name: handle.name || filename }
-      } catch (writeErr) {
-        // 系统对话框可能已建出空文件；再用下载补一份完整内容
-        downloadBlob(blob, handle.name || filename)
-        return { method: 'download-fallback', name: handle.name || filename, error: writeErr }
-      }
-    } catch (err) {
-      if (err?.name === 'AbortError') return { method: 'cancelled' }
-      // NotAllowedError 等：手势失效时回退下载
-      downloadBlob(blob, filename)
-      return { method: 'download', name: filename }
-    }
-  }
-
   downloadBlob(blob, filename)
   return { method: 'download', name: filename }
 }
@@ -197,27 +171,11 @@ export async function openSpaceFromDisk() {
   return readSpaceFile(file)
 }
 
-/** Capture renderer canvas as PNG download. Caller should render once first. */
+/** Capture renderer canvas as PNG — single download, no File System Access picker. */
 export async function captureScreenshot(renderer, filename = 'depth-space.png') {
   const canvas = renderer.domElement
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'))
   if (!blob) throw new Error('截图失败')
-
-  if (window.showSaveFilePicker) {
-    try {
-      const handle = await window.showSaveFilePicker({
-        suggestedName: filename,
-        types: [{ description: 'PNG Image', accept: { 'image/png': ['.png'] } }],
-      })
-      const writable = await handle.createWritable()
-      await writable.write(blob)
-      await writable.close()
-      return { method: 'picker', name: handle.name || filename }
-    } catch (err) {
-      if (err?.name === 'AbortError') return { method: 'cancelled' }
-    }
-  }
-
   downloadBlob(blob, filename)
   return { method: 'download', name: filename }
 }
